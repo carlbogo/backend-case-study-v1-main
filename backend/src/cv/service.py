@@ -7,11 +7,12 @@ from fastapi import HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlmodel import col, select
 
+from src.career_details._matching.service import CareerMatchingService
 from src.cv._conversion.service import CVDatabaseConversionService
 from src.cv._extraction.service import CVExtractionService
 from src.cv._sync.service import CVDatabaseSyncService
 from src.cv.models.cv import CVModel
-from src.cv.models.cv_section import CVSectionModel
+from src.cv.models.cv_section import CVSectionModel, CVSectionType
 from src.cv.views.cv_data import CVData
 from src.cv.views.request import CVUpdateRequest
 from src.cv.views.response import CVListItemResponse, CVTargetCountryResponse, FullCVContent
@@ -32,6 +33,7 @@ class CVService:
         self.extraction_service = CVExtractionService()
         self.conversion_service = CVDatabaseConversionService()
         self.sync_service = CVDatabaseSyncService()
+        self.matching_service = CareerMatchingService()
 
     async def create_cv_from_upload(self, file: UploadFile, user_id: str) -> FullCVContent:
         """Extract a PDF and persist the CV only after successful validation."""
@@ -54,7 +56,7 @@ class CVService:
             raise HTTPException(status_code=502, detail="CV extraction failed. Please try again.") from error
 
         cv_model = self.conversion_service.convert_cv_data_to_model(cv_data, user_id=user_id)
-        await self.db_service.add(cv_model)
+        await self._persist_new_cv(cv_model)
         return await self.conversion_service.convert_cv_data_for_api(cv_data)
 
     async def create_empty_cv(self, user_id: str, language: SupportedLanguage) -> FullCVContent:
@@ -95,7 +97,7 @@ class CVService:
         )
 
         cv_model = self.conversion_service.convert_cv_data_to_model(cv_data, user_id=user_id)
-        await self.db_service.add(cv_model)
+        await self._persist_new_cv(cv_model)
 
         return await self.conversion_service.convert_cv_data_for_api(cv_data)
 
@@ -150,18 +152,24 @@ class CVService:
             return None
         return CVTargetCountryResponse(target_country_code=cv_model.target_country_code)
 
-    async def update_cv(self, cv_id: UUID, request: CVUpdateRequest, user_id: str) -> FullCVContent | None:
+    @with_database_session
+    async def update_cv(self, session: AsyncSession, cv_id: UUID, request: CVUpdateRequest, user_id: str) -> FullCVContent | None:
         """Update an existing CV with authorization check."""
         # Fetch the existing CV and verify ownership
-        existing_cv_model = await self._get_full_cv_model(cv_id, user_id)
+        await self.matching_service.lock_account(session, user_id)
+        existing_cv_model = await self._get_full_cv_model(cv_id, user_id, session)
         if not existing_cv_model:
             return None
+        previous = self.matching_service.snapshot(existing_cv_model)
 
         # Convert request to CVData
         cv_data = self._convert_update_request_to_cv_data(request, existing_cv_model)
 
         # Delegate the synchronization to the sync service
-        updated_cv_model = await self.sync_service.sync_to_database(cv_data)
+        updated_cv_model = await self.sync_service.sync_to_database(session, cv_data)
+        await self.matching_service.reconcile_cv(session, updated_cv_model, previous)
+        await self.matching_service.cleanup_orphans(session, user_id)
+        await session.commit()
 
         # Convert back for API response
         final_cv_data = self.conversion_service.convert_model_to_cv_data(updated_cv_model)
@@ -171,6 +179,7 @@ class CVService:
     async def update_cv_target_country(
         self, session: AsyncSession, cv_id: UUID, country_code: CountryCode, user_id: str
     ) -> FullCVContent | None:
+        await self.matching_service.lock_account(session, user_id)
         cv_model = await self._get_full_cv_model(cv_id, user_id, session)
         if not cv_model:
             return None
@@ -465,24 +474,46 @@ class CVService:
         """Import structured CV data as an independent CV with fresh IDs."""
         imported = self._clone_cv_data_with_new_ids(cv_data)
         model = self.conversion_service.convert_cv_data_to_model(imported, user_id)
-        await self.db_service.add(model)
+        await self._persist_new_cv(model)
         return await self.conversion_service.convert_cv_data_for_api(imported)
 
-    async def duplicate_cv(self, cv_id: UUID, user_id: str) -> FullCVContent | None:
-        source = await self.get_cv_data_by_id(cv_id, user_id)
-        if source is None:
+    @with_database_session
+    async def duplicate_cv(self, session: AsyncSession, cv_id: UUID, user_id: str) -> FullCVContent | None:
+        await self.matching_service.lock_account(session, user_id)
+        source_model = await self._get_full_cv_model(cv_id, user_id, session)
+        if source_model is None:
             return None
+        source = self.conversion_service.convert_model_to_cv_data(source_model)
         copied = self._clone_cv_data_with_new_ids(source)
         model = self.conversion_service.convert_cv_data_to_model(copied, user_id)
         model.parent_cv_id = source.id
-        await self.db_service.add(model)
+        model.person_id = source_model.person_id
+        # Cloning gives exact provenance, so preserve links without probabilistic matching.
+        source_sections = {section.position: section for section in source_model.sections}
+        for section in model.sections:
+            if section.type == CVSectionType.employment:
+                source_items = {item.position: item for item in source_sections[section.position].items}
+                for item in section.items:
+                    item.employment_experience_id = source_items[item.position].employment_experience_id
+                    item.employment_match_method = "duplicate"
+        session.add(model)
+        await session.commit()
         return await self.conversion_service.convert_cv_data_for_api(copied)
 
     @with_database_session
     async def delete_cv(self, session: AsyncSession, cv_id: UUID, user_id: str) -> bool:
+        await self.matching_service.lock_account(session, user_id)
         model = await self._get_full_cv_model(cv_id, user_id, session)
         if model is None:
             return False
         await session.delete(model)
+        await self.matching_service.cleanup_orphans(session, user_id)
         await session.commit()
         return True
+
+    @with_database_session
+    async def _persist_new_cv(self, session: AsyncSession, cv: CVModel):
+        await self.matching_service.lock_account(session, cv.user_id)
+        await self.matching_service.reconcile_cv(session, cv)
+        session.add(cv)
+        await session.commit()

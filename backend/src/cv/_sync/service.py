@@ -9,7 +9,6 @@ from src.cv.models.cv_section import CVSectionModel
 from src.cv.views.cv_data import CVData
 from src.db import selectinload
 from src.db.service import AsyncSession, DatabaseService
-from src.db.utils.wrapper import with_database_session
 from src.utils.classes import singleton
 from src.utils.utils import dedup_identifiable_sorted_items
 
@@ -20,9 +19,8 @@ class CVDatabaseSyncService:
         self.db_service = DatabaseService()
         self.conversion_service = CVDatabaseConversionService()
 
-    @with_database_session
     async def sync_to_database(self, session: AsyncSession, cv_data: CVData) -> CVModel:
-        """Sync CV data to the database and return the updated CV model."""
+        """Sync CV data and return the model; the caller owns the transaction."""
         cv_model = await self._get_full_cv_model(cv_data.id, session)
         new_cv_model = self.conversion_service.convert_cv_data_to_model(cv_data, cv_model.user_id)
 
@@ -84,7 +82,7 @@ class CVDatabaseSyncService:
                         assert new_item is not None, f"New item with id {item.id} not found"
 
                         # Update inner fields of CVItemModel
-                        sync_model_fields(new_item, item)
+                        sync_model_fields(new_item, item, exclude_fields={"employment_match_method"})
 
                 # update attributes
                 existing_attribute_ids = {attribute.id for attribute in section.attributes}
@@ -115,9 +113,11 @@ class CVDatabaseSyncService:
                 section.items = sorted(dedup_identifiable_sorted_items(section.items), key=lambda item: item.position)
                 section.attributes = sorted(dedup_identifiable_sorted_items(section.attributes), key=lambda attribute: attribute.position)
 
-        await session.commit()
+        await session.flush()
 
-        return cv_model
+        # New empty sections may have unloaded relationships after flush. Load
+        # them explicitly before matching/conversion accesses them synchronously.
+        return await self._get_full_cv_model(cv_data.id, session)
 
     # region: - Helpers
 

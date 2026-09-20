@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     DB_URL: str = "postgresql+asyncpg://case_study:case_study@127.0.0.1:55432/case_study"
 
     OPENAI_API_KEY: SecretStr = Field(default=..., min_length=1)
+    CAREER_MATCHING_USE_LLM: bool = True
 
 
 env = Settings()

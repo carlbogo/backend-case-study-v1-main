@@ -11,7 +11,7 @@ from src.db.mixins import utc_created_at_field, utc_updated_at_field
 class CareerDetailsModel(SQLModel, table=True):
     __tablename__: ClassVar[str] = "career_details"
 
-    cv_item_id: UUID = Field(primary_key=True, foreign_key="cv_items.id", ondelete="CASCADE")
+    employment_experience_id: UUID = Field(primary_key=True, foreign_key="employment_experiences.id", ondelete="CASCADE")
 
     annual_salary: int = Field(sa_type=BigInteger)
     salary_currency: str = Field(max_length=3)

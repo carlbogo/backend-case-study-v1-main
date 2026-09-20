@@ -20,6 +20,8 @@ class CVItemModel(SQLModel, table=True):
     )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    employment_experience_id: uuid.UUID | None = Field(default=None, foreign_key="employment_experiences.id", index=True)
+    employment_match_method: str | None = Field(default=None)
 
     # Relationships
     section_id: uuid.UUID = Field(foreign_key="cv_sections.id", ondelete="CASCADE", index=True)

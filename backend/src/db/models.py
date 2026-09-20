@@ -3,6 +3,7 @@
 
 from sqlalchemy.orm import configure_mappers
 
+from src.career_details._matching.models import EmploymentExperienceModel, PersonModel
 from src.career_details.models import CareerDetailsModel
 from src.cv.models.cv import CVModel
 from src.cv.models.cv_attribute import CVAttributeModel
@@ -18,4 +19,6 @@ __all__ = [
     "CVAttributeModel",
     "CVItemModel",
     "CareerDetailsModel",
+    "PersonModel",
+    "EmploymentExperienceModel",
 ]

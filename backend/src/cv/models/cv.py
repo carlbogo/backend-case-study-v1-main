@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime
 from typing import TYPE_CHECKING, ClassVar
 
-from sqlalchemy import CheckConstraint
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint
 from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -120,6 +120,7 @@ class TextAlignment(str, enum.Enum):
 class CVModel(SQLModel, table=True):
     __tablename__: ClassVar[str] = "cvs"
     __table_args__: ClassVar[tuple] = (
+        ForeignKeyConstraint(["person_id", "user_id"], ["career_persons.id", "career_persons.user_id"], name="fk_cv_person_account"),
         CheckConstraint(
             "target_country_code ~ '^[A-Z]{2}$'",
             name="check_cvs_target_country_code_uppercase",
@@ -128,6 +129,7 @@ class CVModel(SQLModel, table=True):
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     user_id: str = Field(..., index=True)
+    person_id: uuid.UUID | None = Field(default=None, index=True)
 
     # CV metadata
     cv_name: str | None = Field(default=None, description="User-defined name for the CV")
